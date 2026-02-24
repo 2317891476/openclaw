@@ -3,10 +3,11 @@ import { lookupContextTokens } from "../../agents/context.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../../agents/defaults.js";
 import { resolveModelAuthMode } from "../../agents/model-auth.js";
 import { isCliProvider } from "../../agents/model-selection.js";
-import { queueEmbeddedPiMessage } from "../../agents/pi-embedded.js";
+import { compactEmbeddedPiSession, queueEmbeddedPiMessage } from "../../agents/pi-embedded.js";
 import { hasNonzeroUsage } from "../../agents/usage.js";
 import {
   resolveAgentIdFromSessionKey,
+  resolveFreshSessionTotalTokens,
   resolveSessionFilePath,
   resolveSessionFilePathOptions,
   resolveSessionTranscriptPath,
@@ -57,6 +58,12 @@ import { createTypingSignaler } from "./typing-mode.js";
 import type { TypingController } from "./typing.js";
 
 const BLOCK_REPLY_SEND_TIMEOUT_MS = 15_000;
+
+// Hard auto-compaction trigger: when cached session totalTokens reaches this value,
+// run compaction before attempting the next agent turn.
+// This is intentionally below the default 272k context window to avoid overflow failures.
+const AUTO_COMPACTION_HARD_LIMIT_TOKENS = 250_000;
+
 const UNSCHEDULED_REMINDER_NOTE =
   "Note: I did not schedule a reminder in this turn, so this will not trigger automatically.";
 const REMINDER_COMMITMENT_PATTERNS: RegExp[] = [
@@ -258,6 +265,65 @@ export async function runReplyAgent(params: {
     storePath,
     isHeartbeat,
   });
+
+  // Proactive compaction: when session size approaches the upper context bound,
+  // compact early (at a hard limit) to avoid overflow failures.
+  const hardLimitTokens = AUTO_COMPACTION_HARD_LIMIT_TOKENS;
+  const cachedTokens = resolveFreshSessionTotalTokens(
+    activeSessionEntry ?? (sessionKey ? activeSessionStore?.[sessionKey] : undefined),
+  );
+  if (
+    !isHeartbeat &&
+    typeof cachedTokens === "number" &&
+    cachedTokens > 0 &&
+    cachedTokens >= hardLimitTokens &&
+    followupRun.run.sessionFile
+  ) {
+    try {
+      const compactResult = await compactEmbeddedPiSession({
+        sessionId: followupRun.run.sessionId,
+        sessionKey,
+        messageProvider: followupRun.run.messageProvider,
+        agentAccountId: followupRun.run.agentAccountId,
+        groupId: followupRun.run.groupId,
+        groupChannel: followupRun.run.groupChannel,
+        groupSpace: followupRun.run.groupSpace,
+        spawnedBy: undefined,
+        senderIsOwner: followupRun.run.senderIsOwner,
+        sessionFile: followupRun.run.sessionFile,
+        workspaceDir: followupRun.run.workspaceDir,
+        agentDir: followupRun.run.agentDir,
+        config: cfg,
+        skillsSnapshot: followupRun.run.skillsSnapshot,
+        provider: followupRun.run.provider,
+        model: followupRun.run.model,
+        thinkLevel: followupRun.run.thinkLevel,
+        reasoningLevel: followupRun.run.reasoningLevel,
+        bashElevated: followupRun.run.bashElevated,
+        extraSystemPrompt: followupRun.run.extraSystemPrompt,
+        ownerNumbers: followupRun.run.ownerNumbers,
+        trigger: "overflow",
+      });
+
+      if (compactResult.ok && compactResult.compacted) {
+        const tokensAfter = compactResult.result?.tokensAfter;
+        await incrementCompactionCount({
+          sessionEntry: activeSessionEntry,
+          sessionStore: activeSessionStore,
+          sessionKey,
+          storePath,
+          tokensAfter,
+        });
+        // Refresh active entry view from store after the update.
+        if (sessionKey && activeSessionStore) {
+          activeSessionEntry = activeSessionStore[sessionKey] ?? activeSessionEntry;
+        }
+      }
+    } catch (err) {
+      // Best-effort: do not fail the user request just because proactive compaction failed.
+      defaultRuntime.warn(`Hard-limit auto-compaction failed: ${String(err)}`);
+    }
+  }
 
   const runFollowupTurn = createFollowupRunner({
     opts,
