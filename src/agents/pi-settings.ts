@@ -72,7 +72,10 @@ export function applyPiCompactionSettingsFromConfig(params: {
     configuredReserveTokens ?? currentReserveTokens,
     reserveTokensFloor,
   );
-  const targetKeepRecentTokens = configuredKeepRecentTokens ?? currentKeepRecentTokens;
+  // Keep a larger recent window by default (unless explicitly configured).
+  const DEFAULT_KEEP_RECENT_TOKENS = 100_000;
+  const targetKeepRecentTokens =
+    configuredKeepRecentTokens ?? Math.max(currentKeepRecentTokens, DEFAULT_KEEP_RECENT_TOKENS);
 
   const overrides: { reserveTokens?: number; keepRecentTokens?: number } = {};
   if (targetReserveTokens !== currentReserveTokens) {

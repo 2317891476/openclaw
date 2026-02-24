@@ -661,8 +661,46 @@ export async function compactEmbeddedPiSessionDirect(
         }
 
         const compactStartedAt = Date.now();
+
+        const DEFAULT_COMPACTION_TEMPLATE = `
+## Purpose
+- Summarize the conversation into a compact checkpoint for continuation.
+
+## Decisions
+- (list only decisions that will matter later)
+
+## Current State
+- (goals, constraints, progress, artifacts/files, errors)
+
+## Open Questions
+- (unknowns / what to clarify next)
+
+## Next Actions
+- (concrete next steps)
+
+## References
+- (links, file paths, ids)
+`.trim();
+
+        const AGGRESSIVE_SUFFIX = `
+
+### Aggressive mode (auto/overflow/retry)
+- Be extremely concise.
+- Prefer bullet points, avoid prose.
+- Drop tool logs, long quotes, and non-essential details.
+- Preserve only P0/P1 facts needed to continue the work.
+`.trim();
+
+        const triggerIsAuto = trigger === "overflow";
+        const retryAttempt = typeof attempt === "number" ? attempt : 1;
+        const baseInstructions = (params.customInstructions ?? "").trim();
+        let compactionInstructions = baseInstructions || DEFAULT_COMPACTION_TEMPLATE;
+        if (triggerIsAuto || retryAttempt > 1) {
+          compactionInstructions = `${compactionInstructions}\n\n${AGGRESSIVE_SUFFIX}`;
+        }
+
         const result = await compactWithSafetyTimeout(() =>
-          session.compact(params.customInstructions),
+          session.compact(compactionInstructions),
         );
         // Estimate tokens after compaction by summing token estimates for remaining messages
         let tokensAfter: number | undefined;
