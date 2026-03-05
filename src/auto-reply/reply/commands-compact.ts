@@ -2,6 +2,7 @@ import {
   abortEmbeddedPiRun,
   compactEmbeddedPiSession,
   isEmbeddedPiRunActive,
+  isEmbeddedPiRunStreaming,
   waitForEmbeddedPiRunEnd,
 } from "../../agents/pi-embedded.js";
 import type { OpenClawConfig } from "../../config/config.js";
@@ -64,7 +65,9 @@ export const handleCompactCommand: CommandHandler = async (params) => {
     };
   }
   const sessionId = params.sessionEntry.sessionId;
-  if (isEmbeddedPiRunActive(sessionId)) {
+  // Only abort when the run is actively streaming output. If it's merely
+  // marked active in a non-streaming tail state, aborting can cancel compaction.
+  if (isEmbeddedPiRunActive(sessionId) && isEmbeddedPiRunStreaming(sessionId)) {
     abortEmbeddedPiRun(sessionId);
     await waitForEmbeddedPiRunEnd(sessionId, 15_000);
   }
@@ -75,7 +78,7 @@ export const handleCompactCommand: CommandHandler = async (params) => {
     agentId: params.agentId,
     isGroup: params.isGroup,
   });
-  const result = await compactEmbeddedPiSession({
+  const compactParams = {
     sessionId,
     sessionKey: params.sessionKey,
     messageChannel: params.command.channel,
@@ -104,10 +107,18 @@ export const handleCompactCommand: CommandHandler = async (params) => {
       defaultLevel: "off",
     },
     customInstructions,
-    trigger: "manual",
+    trigger: "manual" as const,
     senderIsOwner: params.command.senderIsOwner,
     ownerNumbers: params.command.ownerList.length > 0 ? params.command.ownerList : undefined,
-  });
+  };
+
+  let result = await compactEmbeddedPiSession(compactParams);
+  const cancelled = (result.reason ?? "").trim().toLowerCase().includes("cancel");
+  if (!result.ok && cancelled) {
+    // Transient race guard: if compaction was cancelled, wait briefly and retry once.
+    await waitForEmbeddedPiRunEnd(sessionId, 2_000);
+    result = await compactEmbeddedPiSession(compactParams);
+  }
 
   const compactLabel = result.ok
     ? result.compacted
