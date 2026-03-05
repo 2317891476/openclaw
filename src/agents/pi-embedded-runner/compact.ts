@@ -67,7 +67,6 @@ import {
   sanitizeSessionHistory,
   sanitizeToolsForGoogle,
 } from "./google.js";
-import { getDmHistoryLimitFromSessionKey, limitHistoryTurns } from "./history.js";
 import { resolveGlobalLane, resolveSessionLane } from "./lanes.js";
 import { log } from "./logger.js";
 import { buildModelAliasLines, resolveModel } from "./model.js";
@@ -607,16 +606,13 @@ export async function compactEmbeddedPiSessionDirect(
           : validatedGemini;
         // Capture full message history BEFORE limiting — plugins need the complete conversation
         const preCompactionMessages = [...session.messages];
-        const truncated = limitHistoryTurns(
-          validated,
-          getDmHistoryLimitFromSessionKey(params.sessionKey, params.config),
-        );
-        // Re-run tool_use/tool_result pairing repair after truncation, since
-        // limitHistoryTurns can orphan tool_result blocks by removing the
-        // assistant message that contained the matching tool_use.
+        // Keep full validated history for compaction; do not pre-trim turns.
+        const fullHistory = validated;
+        // Keep tool_use/tool_result pairing repair on the full history so
+        // providers still receive valid turn structure.
         const limited = transcriptPolicy.repairToolUseResultPairing
-          ? sanitizeToolUseResultPairing(truncated)
-          : truncated;
+          ? sanitizeToolUseResultPairing(fullHistory)
+          : fullHistory;
         if (limited.length > 0) {
           session.agent.replaceMessages(limited);
         }
