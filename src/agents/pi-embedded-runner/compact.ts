@@ -681,21 +681,32 @@ export async function compactEmbeddedPiSessionDirect(
 - (links, file paths, ids)
 `.trim();
 
-        const AGGRESSIVE_SUFFIX = `
+        const BALANCED_OVERFLOW_SUFFIX = `
 
-### Aggressive mode (auto/overflow/retry)
-- Be extremely concise.
-- Prefer bullet points, avoid prose.
-- Drop tool logs, long quotes, and non-essential details.
-- Preserve only P0/P1 facts needed to continue the work.
+### Overflow mode (balanced retention)
+- Keep continuity fidelity high; do not over-compress unless strictly necessary.
+- Preserve key specifics verbatim when possible: commit hashes, file paths, ids, commands, config keys/values.
+- Prefer compact bullets, but keep enough detail for accurate follow-up implementation/debugging.
+- Keep recent technical context richer than older context.
+`.trim();
+
+        const AGGRESSIVE_RETRY_SUFFIX = `
+
+### Retry mode (aggressive fallback)
+- Be concise to recover from repeated overflow.
+- Prefer bullet points over prose.
+- Drop tool logs, long quotes, and clearly non-essential details.
+- Preserve only facts needed to continue the active task safely.
 `.trim();
 
         const triggerIsAuto = trigger === "overflow";
         const retryAttempt = typeof attempt === "number" ? attempt : 1;
         const baseInstructions = (params.customInstructions ?? "").trim();
         let compactionInstructions = baseInstructions || DEFAULT_COMPACTION_TEMPLATE;
-        if (triggerIsAuto || retryAttempt > 1) {
-          compactionInstructions = `${compactionInstructions}\n\n${AGGRESSIVE_SUFFIX}`;
+        if (retryAttempt > 1) {
+          compactionInstructions = `${compactionInstructions}\n\n${AGGRESSIVE_RETRY_SUFFIX}`;
+        } else if (triggerIsAuto) {
+          compactionInstructions = `${compactionInstructions}\n\n${BALANCED_OVERFLOW_SUFFIX}`;
         }
 
         const result = await compactWithSafetyTimeout(() =>
