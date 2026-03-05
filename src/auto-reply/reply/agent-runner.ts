@@ -381,15 +381,29 @@ export async function runReplyAgent(params: {
             sessionStore: activeSessionStore,
             sessionKey,
             storePath,
-            contextTokensUsed: tokensAfter,
-            lastCallUsage: undefined,
+            tokensAfterCompaction: tokensAfter,
           });
           if (sessionKey && activeSessionStore) {
             activeSessionEntry = activeSessionStore[sessionKey] ?? activeSessionEntry;
           }
+
+          // Inject post-compaction workspace context for the next agent turn
+          if (sessionKey) {
+            const workspaceDir = process.cwd();
+            readPostCompactionContext(workspaceDir, cfg)
+              .then((contextContent) => {
+                if (contextContent) {
+                  enqueueSystemEvent(contextContent, { sessionKey });
+                }
+              })
+              .catch(() => {
+                // Silent failure — post-compaction context is best-effort
+              });
+          }
         }
       } catch (err) {
         defaultRuntime.error(`Hard-limit auto-compaction failed: ${String(err)}`);
+        await resetSessionAfterCompactionFailure(String(err));
       }
     }
 
