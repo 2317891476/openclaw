@@ -688,6 +688,14 @@ export async function compactEmbeddedPiSessionDirect(
 - Preserve key specifics verbatim when possible: commit hashes, file paths, ids, commands, config keys/values.
 - Prefer compact bullets, but keep enough detail for accurate follow-up implementation/debugging.
 - Keep recent technical context richer than older context.
+- Keep concrete troubleshooting evidence when present (error strings, failing file/function names, stack lines).
+
+### Required carry-forward checklist (must include when present)
+- Current branch/channel/runtime version and active model
+- Latest important commits (id + short intent)
+- Active constraints / hard rules from user
+- Files currently being edited or blocked
+- Unresolved conflicts/blockers and next action owner
 `.trim();
 
         const AGGRESSIVE_RETRY_SUFFIX = `
