@@ -3,11 +3,10 @@ import { lookupContextTokens } from "../../agents/context.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../../agents/defaults.js";
 import { resolveModelAuthMode } from "../../agents/model-auth.js";
 import { isCliProvider } from "../../agents/model-selection.js";
-import { compactEmbeddedPiSession, queueEmbeddedPiMessage } from "../../agents/pi-embedded.js";
+import { queueEmbeddedPiMessage } from "../../agents/pi-embedded.js";
 import { hasNonzeroUsage } from "../../agents/usage.js";
 import {
   resolveAgentIdFromSessionKey,
-  resolveFreshSessionTotalTokens,
   resolveSessionFilePath,
   resolveSessionFilePathOptions,
   resolveSessionTranscriptPath,
@@ -40,6 +39,11 @@ import {
 } from "./agent-runner-helpers.js";
 import { runMemoryFlushIfNeeded } from "./agent-runner-memory.js";
 import { buildReplyPayloads } from "./agent-runner-payloads.js";
+import {
+  appendUnscheduledReminderNote,
+  hasSessionRelatedCronJobs,
+  hasUnbackedReminderCommitment,
+} from "./agent-runner-reminder-guard.js";
 import { appendUsageLine, formatResponseUsageLine } from "./agent-runner-utils.js";
 import { createAudioAsVoiceBuffer, createBlockReplyPipeline } from "./block-reply-pipeline.js";
 import { resolveEffectiveBlockStreamingConfig } from "./block-streaming.js";
@@ -54,47 +58,6 @@ import { createTypingSignaler } from "./typing-mode.js";
 import type { TypingController } from "./typing.js";
 
 const BLOCK_REPLY_SEND_TIMEOUT_MS = 15_000;
-
-// Hard auto-compaction trigger: when cached session totalTokens reaches this value,
-// run compaction before attempting the next agent turn.
-// This is intentionally below the default 272k context window to avoid overflow failures.
-const AUTO_COMPACTION_HARD_LIMIT_TOKENS = 250_000;
-
-const UNSCHEDULED_REMINDER_NOTE =
-  "Note: I did not schedule a reminder in this turn, so this will not trigger automatically.";
-const REMINDER_COMMITMENT_PATTERNS: RegExp[] = [
-  /\b(?:i\s*['’]?ll|i will)\s+(?:make sure to\s+)?(?:remember|remind|ping|follow up|follow-up|check back|circle back)\b/i,
-  /\b(?:i\s*['’]?ll|i will)\s+(?:set|create|schedule)\s+(?:a\s+)?reminder\b/i,
-];
-
-function hasUnbackedReminderCommitment(text: string): boolean {
-  const normalized = text.toLowerCase();
-  if (!normalized.trim()) {
-    return false;
-  }
-  if (normalized.includes(UNSCHEDULED_REMINDER_NOTE.toLowerCase())) {
-    return false;
-  }
-  return REMINDER_COMMITMENT_PATTERNS.some((pattern) => pattern.test(text));
-}
-
-function appendUnscheduledReminderNote(payloads: ReplyPayload[]): ReplyPayload[] {
-  let appended = false;
-  return payloads.map((payload) => {
-    if (appended || payload.isError || typeof payload.text !== "string") {
-      return payload;
-    }
-    if (!hasUnbackedReminderCommitment(payload.text)) {
-      return payload;
-    }
-    appended = true;
-    const trimmed = payload.text.trimEnd();
-    return {
-      ...payload,
-      text: `${trimmed}\n\n${UNSCHEDULED_REMINDER_NOTE}`,
-    };
-  });
-}
 
 export async function runReplyAgent(params: {
   commandBody: string;
@@ -270,65 +233,6 @@ export async function runReplyAgent(params: {
     storePath,
     isHeartbeat,
   });
-
-  // Proactive compaction: when session size approaches the upper context bound,
-  // compact early (at a hard limit) to avoid overflow failures.
-  const hardLimitTokens = AUTO_COMPACTION_HARD_LIMIT_TOKENS;
-  const cachedTokens = resolveFreshSessionTotalTokens(
-    activeSessionEntry ?? (sessionKey ? activeSessionStore?.[sessionKey] : undefined),
-  );
-  if (
-    !isHeartbeat &&
-    typeof cachedTokens === "number" &&
-    cachedTokens > 0 &&
-    cachedTokens >= hardLimitTokens &&
-    followupRun.run.sessionFile
-  ) {
-    try {
-      const compactResult = await compactEmbeddedPiSession({
-        sessionId: followupRun.run.sessionId,
-        sessionKey,
-        messageProvider: followupRun.run.messageProvider,
-        agentAccountId: followupRun.run.agentAccountId,
-        groupId: followupRun.run.groupId,
-        groupChannel: followupRun.run.groupChannel,
-        groupSpace: followupRun.run.groupSpace,
-        spawnedBy: undefined,
-        senderIsOwner: followupRun.run.senderIsOwner,
-        sessionFile: followupRun.run.sessionFile,
-        workspaceDir: followupRun.run.workspaceDir,
-        agentDir: followupRun.run.agentDir,
-        config: cfg,
-        skillsSnapshot: followupRun.run.skillsSnapshot,
-        provider: followupRun.run.provider,
-        model: followupRun.run.model,
-        thinkLevel: followupRun.run.thinkLevel,
-        reasoningLevel: followupRun.run.reasoningLevel,
-        bashElevated: followupRun.run.bashElevated,
-        extraSystemPrompt: followupRun.run.extraSystemPrompt,
-        ownerNumbers: followupRun.run.ownerNumbers,
-        trigger: "overflow",
-      });
-
-      if (compactResult.ok && compactResult.compacted) {
-        const tokensAfter = compactResult.result?.tokensAfter;
-        await incrementCompactionCount({
-          sessionEntry: activeSessionEntry,
-          sessionStore: activeSessionStore,
-          sessionKey,
-          storePath,
-          tokensAfter,
-        });
-        // Refresh active entry view from store after the update.
-        if (sessionKey && activeSessionStore) {
-          activeSessionEntry = activeSessionStore[sessionKey] ?? activeSessionEntry;
-        }
-      }
-    } catch (err) {
-      // Best-effort: do not fail the user request just because proactive compaction failed.
-      defaultRuntime.warn(`Hard-limit auto-compaction failed: ${String(err)}`);
-    }
-  }
 
   const runFollowupTurn = createFollowupRunner({
     opts,
@@ -606,8 +510,17 @@ export async function runReplyAgent(params: {
         typeof payload.text === "string" &&
         hasUnbackedReminderCommitment(payload.text),
     );
-    const guardedReplyPayloads =
+    // Suppress the guard note when an existing cron job (created in a prior
+    // turn) already covers the commitment — avoids false positives (#32228).
+    const coveredByExistingCron =
       hasReminderCommitment && successfulCronAdds === 0
+        ? await hasSessionRelatedCronJobs({
+            cronStorePath: cfg.cron?.store,
+            sessionKey,
+          })
+        : false;
+    const guardedReplyPayloads =
+      hasReminderCommitment && successfulCronAdds === 0 && !coveredByExistingCron
         ? appendUnscheduledReminderNote(replyPayloads)
         : replyPayloads;
 
@@ -753,7 +666,7 @@ export async function runReplyAgent(params: {
       // Inject post-compaction workspace context for the next agent turn
       if (sessionKey) {
         const workspaceDir = process.cwd();
-        readPostCompactionContext(workspaceDir)
+        readPostCompactionContext(workspaceDir, cfg)
           .then((contextContent) => {
             if (contextContent) {
               enqueueSystemEvent(contextContent, { sessionKey });
