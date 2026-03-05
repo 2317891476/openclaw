@@ -376,6 +376,18 @@ export async function runReplyAgent(params: {
 
         if (compactResult.ok && compactResult.compacted) {
           const tokensAfter = compactResult.result?.tokensAfter;
+          emitAgentEvent({
+            runId: generateSecureUuid(),
+            sessionKey,
+            stream: "lifecycle",
+            data: {
+              phase: "proactive_compaction_complete",
+              trigger: "hard_limit",
+              thresholdTokens: AUTO_COMPACTION_HARD_LIMIT_TOKENS,
+              tokensBefore: cachedTokens,
+              tokensAfter: typeof tokensAfter === "number" ? tokensAfter : null,
+            },
+          });
           await incrementRunCompactionCount({
             sessionEntry: activeSessionEntry,
             sessionStore: activeSessionStore,
